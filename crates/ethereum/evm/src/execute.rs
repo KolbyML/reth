@@ -21,11 +21,13 @@ use reth_prune_types::PruneModes;
 use reth_revm::{
     batch::{BlockBatchRecord, BlockExecutorStats},
     db::states::bundle_state::BundleRetention,
+    inspector_handle_register,
+    inspectors::TracerEip3155,
     state_change::{
         apply_beacon_root_contract_call, apply_blockhashes_update,
         apply_withdrawal_requests_contract_call, post_block_balance_increments,
     },
-    Evm, State,
+    Evm, EvmBuilder, State,
 };
 use revm_primitives::{
     db::{Database, DatabaseCommit},
@@ -34,6 +36,10 @@ use revm_primitives::{
 
 #[cfg(feature = "std")]
 use std::{fmt::Display, sync::Arc, vec, vec::Vec};
+use std::{
+    fs::{self, File},
+    path::Path,
+};
 /// Provides executors to execute regular ethereum blocks
 #[derive(Debug, Clone)]
 pub struct EthExecutorProvider<EvmConfig = EthEvmConfig> {
@@ -174,26 +180,62 @@ where
                     transaction_gas_limit: transaction.gas_limit(),
                     block_available_gas,
                 }
-                .into())
+                .into());
             }
-
+            let hash = transaction.recalculate_hash();
             self.evm_config.fill_tx_env(evm.tx_mut(), transaction, *sender);
 
-            // Execute transaction.
-            let ResultAndState { result, state } = evm.transact().map_err(move |err| {
-                let new_err = match err {
-                    EVMError::Transaction(e) => EVMError::Transaction(e),
-                    EVMError::Header(e) => EVMError::Header(e),
-                    EVMError::Database(e) => EVMError::Database(e.into()),
-                    EVMError::Custom(e) => EVMError::Custom(e),
-                    EVMError::Precompile(e) => EVMError::Precompile(e),
-                };
-                // Ensure hash is calculated for error log, if not already done
-                BlockValidationError::EVM {
-                    hash: transaction.recalculate_hash(),
-                    error: Box::new(new_err),
+            // Execute transaction.'
+            let block_number = block.number;
+
+            let ResultAndState { result, state } = match block_number == 2303309 {
+                false => evm.transact().map_err(move |err| {
+                    let new_err = match err {
+                        EVMError::Transaction(e) => EVMError::Transaction(e),
+                        EVMError::Header(e) => EVMError::Header(e),
+                        EVMError::Database(e) => EVMError::Database(e.into()),
+                        EVMError::Custom(e) => EVMError::Custom(e),
+                        EVMError::Precompile(e) => EVMError::Precompile(e),
+                    };
+                    // Ensure hash is calculated for error log, if not already done
+                    BlockValidationError::EVM {
+                        hash: transaction.recalculate_hash(),
+                        error: Box::new(new_err),
+                    }
+                })?,
+                true => {
+                    let output_path = Path::new("/Users/kolbymoroz/Documents/reth_debug")
+                        .join("evm_traces")
+                        .join(format!("block{block_number}"));
+                    fs::create_dir_all(&output_path).unwrap();
+                    let output_file =
+                        File::create(output_path.join(format!("tx{}.json", hash))).unwrap();
+                    let hi = TracerEip3155::new(Box::new(output_file));
+
+                    let mut evm3 = Evm::builder()
+                        .with_env(evm.context.evm.inner.env.clone())
+                        .with_spec_id(evm.handler.cfg.spec_id)
+                        .with_db(&mut evm.context.evm.inner.db)
+                        .with_external_context(hi)
+                        .append_handler_register(inspector_handle_register)
+                        .build();
+
+                    evm3.transact().map_err(move |err| {
+                        let new_err = match err {
+                            EVMError::Transaction(e) => EVMError::Transaction(e),
+                            EVMError::Header(e) => EVMError::Header(e),
+                            EVMError::Database(e) => EVMError::Database(e.into()),
+                            EVMError::Custom(e) => EVMError::Custom(e),
+                            EVMError::Precompile(e) => EVMError::Precompile(e),
+                        };
+                        // Ensure hash is calculated for error log, if not already done
+                        BlockValidationError::EVM {
+                            hash: transaction.recalculate_hash(),
+                            error: Box::new(new_err),
+                        }
+                    })?
                 }
-            })?;
+            };
             evm.db_mut().commit(state);
 
             // append gas used

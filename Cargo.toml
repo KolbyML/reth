@@ -368,10 +368,11 @@ reth-trie-parallel = { path = "crates/trie/parallel" }
 revm = { version = "10.0.0", features = [
     "std",
     "secp256k1",
-    "blst",
+    "blst", "serde-json"
 ], default-features = false }
 revm-primitives = { version = "5.0.0", features = [
-    "std",
+    "std", 
+    "serde"
 ], default-features = false }
 revm-inspectors = "0.1"
 
