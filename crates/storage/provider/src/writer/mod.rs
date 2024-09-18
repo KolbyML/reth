@@ -24,6 +24,7 @@ use reth_storage_api::{
 use reth_storage_errors::writer::UnifiedStorageWriterError;
 use revm::db::OriginalValuesKnown;
 use std::{borrow::Borrow, sync::Arc};
+use tracing::info;
 use tracing::{debug, instrument};
 
 mod database;
@@ -96,7 +97,7 @@ impl<'a, TX, SF> UnifiedStorageWriter<'a, TX, SF> {
     #[allow(unused)]
     const fn ensure_static_file(&self) -> Result<(), UnifiedStorageWriterError> {
         if self.static_file.is_none() {
-            return Err(UnifiedStorageWriterError::MissingStaticFileWriter)
+            return Err(UnifiedStorageWriterError::MissingStaticFileWriter);
         }
         Ok(())
     }
@@ -146,7 +147,7 @@ where
     pub fn save_blocks(&self, blocks: &[ExecutedBlock]) -> ProviderResult<()> {
         if blocks.is_empty() {
             debug!(target: "provider::storage_writer", "Attempted to write empty block range");
-            return Ok(())
+            return Ok(());
         }
 
         // NOTE: checked non-empty above
@@ -436,8 +437,8 @@ where
         // * If we are in live sync. In this case, `UnifiedStorageWriter` is built without a static
         //   file writer.
         // * If there is any kind of receipt pruning
-        let mut storage_type = if self.static_file.is_none() ||
-            self.database().prune_modes_ref().has_receipts_pruning()
+        let mut storage_type = if self.static_file.is_none()
+            || self.database().prune_modes_ref().has_receipts_pruning()
         {
             StorageType::Database(self.database().tx_ref().cursor_write::<tables::Receipts>()?)
         } else {
@@ -501,6 +502,13 @@ where
     ) -> ProviderResult<()> {
         let (plain_state, reverts) =
             execution_outcome.bundle.into_plain_state_and_reverts(is_value_known);
+
+        info!(
+            "Committing bundle state with {} accounts, {} contracts, {} storage changes",
+            plain_state.accounts.len(),
+            plain_state.contracts.len(),
+            plain_state.storage.len()
+        );
 
         self.database().write_state_reverts(reverts, execution_outcome.first_block)?;
 

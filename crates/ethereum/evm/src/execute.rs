@@ -4,7 +4,7 @@ use crate::{
     dao_fork::{DAO_HARDFORK_BENEFICIARY, DAO_HARDKFORK_ACCOUNTS},
     EthEvmConfig,
 };
-use core::fmt::Display;
+use core::{fmt::Display, hash::Hash};
 use reth_chainspec::{ChainSpec, EthereumHardforks, MAINNET};
 use reth_ethereum_consensus::validate_block_post_execution;
 use reth_evm::{
@@ -24,12 +24,16 @@ use reth_primitives::{
 };
 use reth_prune_types::PruneModes;
 use reth_revm::{
-    batch::BlockBatchRecord, db::states::bundle_state::BundleRetention,
-    state_change::post_block_balance_increments, Evm, State,
+    batch::BlockBatchRecord, db::states::bundle_state::BundleRetention, inspector_handle_register,
+    inspectors::TracerEip3155, state_change::post_block_balance_increments, Evm, State,
 };
 use revm_primitives::{
     db::{Database, DatabaseCommit},
-    BlockEnv, CfgEnvWithHandlerCfg, EVMError, EnvWithHandlerCfg, ResultAndState,
+    BlockEnv, CfgEnvWithHandlerCfg, EVMError, EnvWithHandlerCfg, ResultAndState, SpecId,
+};
+use std::{
+    fs::{self, File},
+    path::Path,
 };
 
 #[cfg(not(feature = "std"))]
@@ -175,26 +179,62 @@ where
                     transaction_gas_limit: transaction.gas_limit(),
                     block_available_gas,
                 }
-                .into())
+                .into());
             }
 
             self.evm_config.fill_tx_env(evm.tx_mut(), transaction, *sender);
 
             // Execute transaction.
-            let ResultAndState { result, state } = evm.transact().map_err(move |err| {
-                let new_err = match err {
-                    EVMError::Transaction(e) => EVMError::Transaction(e),
-                    EVMError::Header(e) => EVMError::Header(e),
-                    EVMError::Database(e) => EVMError::Database(e.into()),
-                    EVMError::Custom(e) => EVMError::Custom(e),
-                    EVMError::Precompile(e) => EVMError::Precompile(e),
-                };
-                // Ensure hash is calculated for error log, if not already done
-                BlockValidationError::EVM {
-                    hash: transaction.recalculate_hash(),
-                    error: Box::new(new_err),
+
+            let block_number: u64 = evm.block().number.to();
+            let ResultAndState { result, state } = match block_number == 15537397 {
+                true => {
+                    let output_path = Path::new("/media/kolby/backup")
+                        .join("evm_traces")
+                        .join(format!("block_{block_number}"));
+                    fs::create_dir_all(&output_path).expect("Failed to create output directory");
+                    let output_file =
+                        File::create(output_path.join(format!("tx_{}.json", transaction.hash)))
+                            .expect("Failed to create output file");
+                    let mut evm_with_tracer = Evm::builder()
+                        .with_env(evm.context.evm.inner.env.clone())
+                        .with_spec_id(evm.handler.cfg.spec_id)
+                        .with_db(&mut evm.context.evm.inner.db)
+                        .with_external_context(TracerEip3155::new(Box::new(output_file)))
+                        .append_handler_register(inspector_handle_register)
+                        .build();
+                    evm_with_tracer.transact().map_err(move |err| {
+                        let new_err = match err {
+                            EVMError::Transaction(e) => EVMError::Transaction(e),
+                            EVMError::Header(e) => EVMError::Header(e),
+                            EVMError::Database(e) => EVMError::Database(e.into()),
+                            EVMError::Custom(e) => EVMError::Custom(e),
+                            EVMError::Precompile(e) => EVMError::Precompile(e),
+                        };
+                        // Ensure hash is calculated for error log, if not already done
+                        BlockValidationError::EVM {
+                            hash: transaction.recalculate_hash(),
+                            error: Box::new(new_err),
+                        }
+                    })?
                 }
-            })?;
+                false => {
+                    evm.transact().map_err(move |err| {
+                        let new_err = match err {
+                            EVMError::Transaction(e) => EVMError::Transaction(e),
+                            EVMError::Header(e) => EVMError::Header(e),
+                            EVMError::Database(e) => EVMError::Database(e.into()),
+                            EVMError::Custom(e) => EVMError::Custom(e),
+                            EVMError::Precompile(e) => EVMError::Precompile(e),
+                        };
+                        // Ensure hash is calculated for error log, if not already done
+                        BlockValidationError::EVM {
+                            hash: transaction.recalculate_hash(),
+                            error: Box::new(new_err),
+                        }
+                    })?
+                }
+            };
             evm.db_mut().commit(state);
 
             // append gas used
