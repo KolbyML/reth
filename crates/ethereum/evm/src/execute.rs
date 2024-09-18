@@ -193,9 +193,10 @@ where
                         .join("evm_traces")
                         .join(format!("block_{block_number}"));
                     fs::create_dir_all(&output_path).expect("Failed to create output directory");
-                    let output_file =
-                        File::create(output_path.join(format!("tx_{}.json", transaction.hash)))
-                            .expect("Failed to create output file");
+                    let output_file = File::create(
+                        output_path.join(format!("tx_{}.json", transaction.recalculate_hash())),
+                    )
+                    .expect("Failed to create output file");
                     let mut evm_with_tracer = Evm::builder()
                         .with_env(evm.context.evm.inner.env.clone())
                         .with_spec_id(evm.handler.cfg.spec_id)
